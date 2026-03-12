@@ -1,63 +1,35 @@
-#include <Adafruit_NeoPixel.h>
+#include <FastLED.h>
 
-// Onboard addressable RGB LED (NeoPixel) on IO48
-const int RGB_PIN    = 48;
-const int RGB_COUNT  = 1;
+constexpr uint8_t ledPin = 37; // Data pin for WS2812B LED strip
+constexpr uint8_t sensorPin = 6; // Ambient light sensor analog pin
 
-Adafruit_NeoPixel rgb(RGB_COUNT, RGB_PIN, NEO_GRB + NEO_KHZ800);
+#define NUM_LEDS 5
+CRGB leds[NUM_LEDS];
+
+void wifiConnect();
 
 void setup() {
-  // Initialize Serial at 115200 baud
   Serial.begin(115200);
-  delay(1000);
+  delay(200);
+  wifiConnect();
 
-  Serial.println("\n--- ESP32-S3 TEST ---");
-  
-  // 1. Check chip information
-  Serial.printf("Chip Model: %s\n", ESP.getChipModel());
-  Serial.printf("Chip Cores: %d\n", ESP.getChipCores());
-  
-
-  // 2. Check flash memory (important for running AI later)
-  Serial.printf("Flash Size: %d MB\n", ESP.getFlashChipSize() / (1024 * 1024));
-  
-  // Check PSRAM (if > 0, OPI PSRAM is enabled correctly)
-  if (psramInit()) {
-    Serial.printf("PSRAM Size: %d MB (Detected - Good!)\n", ESP.getPsramSize() / (1024 * 1024));
-  } else {
-    Serial.println("PSRAM: Not detected (please re-check Tools -> PSRAM settings)");
-  }
-
-  Serial.println("------------------------------");
-  Serial.println("If you see this message repeatedly, your ESP32-S3 is running correctly!");
-
-  // Initialize NeoPixel RGB LED on IO48
-  rgb.begin();
-  rgb.show(); // Turn off LED at startup
-}
-
-// Helper function to set RGB LED color (0–255)
-void setRgbColor(uint8_t r, uint8_t g, uint8_t b) {
-  rgb.setPixelColor(0, rgb.Color(r, g, b));
-  rgb.show();
+  FastLED.addLeds<WS2812B, ledPin, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(64);
 }
 
 void loop() {
-  Serial.println("Hello World! Tom is waiting for commands...");
-  
-  // Green
-  setRgbColor(0, 255, 0);
-  delay(1000);
+  const int lightLevel = analogRead(sensorPin); // ESP32 ADC is typically 0..4095
 
-  // Red
-  setRgbColor(255, 0, 0);
-  delay(1000);
+  // Darker room (lower reading) -> brighter LEDs.
+  int brightness = map(lightLevel, 0, 4095, 255, 0);
+  brightness = constrain(brightness, 0, 255);
 
-  // Purple (Red + Blue)
-  setRgbColor(255, 0, 255);
-  delay(1000);
+  FastLED.setBrightness(static_cast<uint8_t>(brightness));
 
-  // Yellow (Red + Green)
-  setRgbColor(255, 255, 0);
-  delay(1000);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = CRGB::White;
+  }
+
+  FastLED.show();
+  delay(50);
 }
