@@ -12,6 +12,7 @@ static WiFiClient gNetClient;
 static PubSubClient gMqtt(gNetClient);
 
 extern bool gLightOn;
+extern bool gNeedsUpdate;
 
 static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   if (!topic) return;
@@ -26,11 +27,17 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   msg.toUpperCase();
 
   if (msg == "ON") {
-    gLightOn = true;
-    Serial.println("[MQTT] Light => ON");
+    if (!gLightOn) {
+      gLightOn = true;
+      gNeedsUpdate = true;
+      Serial.println("[MQTT] Light => ON");
+    }
   } else if (msg == "OFF") {
-    gLightOn = false;
-    Serial.println("[MQTT] Light => OFF");
+    if (gLightOn) {
+      gLightOn = false;
+      gNeedsUpdate = true;
+      Serial.println("[MQTT] Light => OFF");
+    }
   } else {
     Serial.print("[MQTT] Ignored payload: ");
     Serial.println(msg);

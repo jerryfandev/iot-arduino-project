@@ -1,18 +1,19 @@
-#include <FastLED.h>
+#include <Adafruit_NeoPixel.h>
 
-constexpr uint8_t ledPin = 37; // Data pin for WS2812B LED strip
-constexpr uint8_t sensorPin = 6; // Ambient light sensor analog pin
+constexpr uint8_t ledPin = 2; // Changed to PIN 1 (port "1 2" at the top edge of the board)
+constexpr uint8_t sensorPin = 4; // Ambient light sensor analog pin
 
 #define NUM_LEDS 5
-CRGB leds[NUM_LEDS];
+Adafruit_NeoPixel pixels(NUM_LEDS, ledPin, NEO_GRB + NEO_KHZ800);
 
 void wifiConnect();
 void mqttSetup();
 void mqttLoop();
 
-// Trạng thái đèn nhận từ MQTT topic `home/livingroom/light` ("ON"/"OFF`).
-// Mặc định OFF, chỉ khi nhận được lệnh ON mới bật và dùng ambient sensor.
+// Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
+// Default OFF, only turn ON and use ambient sensor when ON command is received.
 bool gLightOn = false;
+bool gNeedsUpdate = true; // Flag indicating LED update needed
 
 void setup() {
   Serial.begin(115200);
@@ -20,33 +21,29 @@ void setup() {
   wifiConnect();
   mqttSetup();
 
-  FastLED.addLeds<WS2812B, ledPin, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(64);
+  pixels.begin();
+  pixels.setBrightness(128);
+  pixels.show(); // Initialize all pixels to 'off'
 }
 
 void loop() {
   mqttLoop();
 
-  if (!gLightOn) {
-    for (int i = 0; i < NUM_LEDS; i++) {
-      leds[i] = CRGB::Black;
+  // Only call pixels.show() when state changes
+  if (gNeedsUpdate) {
+    if (gLightOn) {
+      pixels.setBrightness(128);
+      for(int i=0; i<NUM_LEDS; i++) {
+        pixels.setPixelColor(i, pixels.Color(255, 255, 255));
+      }
+    } else {
+      pixels.clear(); // Set all pixel colors to 'off'
     }
-    FastLED.show();
-    delay(50);
-    return;
+    pixels.show();
+    gNeedsUpdate = false;
+    Serial.println(gLightOn ? "[LED] Updated: ON" : "[LED] Updated: OFF");
   }
-
-  // Ambient light sensor logic được tạm tắt.
-  // const int lightLevel = analogRead(sensorPin); // ESP32 ADC is typically 0..4095
-  // int brightness = map(lightLevel, 0, 4095, 255, 0);
-  // brightness = constrain(brightness, 0, 255);
-  // FastLED.setBrightness(static_cast<uint8_t>(brightness));
-  FastLED.setBrightness(128);
-
-  for (int i = 0; i < NUM_LEDS; i++) {
-    leds[i] = CRGB::White;
-  }
-
-  FastLED.show();
-  delay(50);
+  
+  // Small delay to yield CPU for background tasks (WiFi/MQTT)
+  delay(20);
 }
