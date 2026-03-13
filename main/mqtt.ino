@@ -7,17 +7,19 @@ static const uint16_t MQTT_PORT = 1883;
 
 // Topic must match Web dashboard
 static const char* MQTT_TOPIC = "home/livingroom/light";
+static const char* MQTT_TOPIC_SENSOR = "home/livingroom/light-sensor";
 
 static WiFiClient gNetClient;
 static PubSubClient gMqtt(gNetClient);
 
 extern bool gLightOn;
 extern bool gNeedsUpdate;
+extern bool gLightSensorEnabled;
 
 static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   if (!topic) return;
-  if (String(topic) != String(MQTT_TOPIC)) return;
 
+  String topicStr = String(topic);
   String msg;
   msg.reserve(length + 1);
   for (unsigned int i = 0; i < length; i++) {
@@ -26,22 +28,37 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   msg.trim();
   msg.toUpperCase();
 
-  if (msg == "ON") {
-    if (!gLightOn) {
-      gLightOn = true;
-      gNeedsUpdate = true;
-      Serial.println("[MQTT] Light => ON");
+  if (topicStr == MQTT_TOPIC) {
+    if (msg == "ON") {
+      if (!gLightOn) {
+        gLightOn = true;
+        gNeedsUpdate = true;
+        Serial.println("[MQTT] Light => ON");
+      }
+    } else if (msg == "OFF") {
+      if (gLightOn) {
+        gLightOn = false;
+        gNeedsUpdate = true;
+        Serial.println("[MQTT] Light => OFF");
+      }
     }
-  } else if (msg == "OFF") {
-    if (gLightOn) {
-      gLightOn = false;
-      gNeedsUpdate = true;
-      Serial.println("[MQTT] Light => OFF");
+  } else if (topicStr == MQTT_TOPIC_SENSOR) {
+    if (msg == "ON") {
+      if (!gLightSensorEnabled) {
+        gLightSensorEnabled = true;
+        Serial.println("[MQTT] Light Sensor => ON");
+      }
+    } else if (msg == "OFF") {
+      if (gLightSensorEnabled) {
+        gLightSensorEnabled = false;
+        Serial.println("[MQTT] Light Sensor => OFF");
+      }
     }
   } else {
-    Serial.print("[MQTT] Ignored payload: ");
+    Serial.print("[MQTT] Ignored topic/payload: ");
+    Serial.print(topicStr);
+    Serial.print(" ");
     Serial.println(msg);
-    return;
   }
 }
 
@@ -63,6 +80,7 @@ static void mqttEnsureConnected() {
   if (gMqtt.connect(clientId.c_str())) {
     Serial.println("[MQTT] Connected");
     gMqtt.subscribe(MQTT_TOPIC);
+    gMqtt.subscribe(MQTT_TOPIC_SENSOR);
     return;
   }
 
