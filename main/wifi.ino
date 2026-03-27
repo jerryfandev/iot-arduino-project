@@ -23,22 +23,33 @@ void wifiConnect() {
   Serial.print("Connecting to WiFi SSID: ");
   Serial.println(WIFI_SSID);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Retry forever until connected.
+  uint32_t attempt = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    attempt++;
+    Serial.print("WiFi connect attempt #");
+    Serial.println(attempt);
 
-  const unsigned long start = millis();
-  const unsigned long timeoutMs = 20000;
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println();
+    WiFi.disconnect(true /* wifioff */);
+    delay(200);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi connected. IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("WiFi connect timeout (continuing without WiFi).");
+    const unsigned long attemptStart = millis();
+    const unsigned long attemptWindowMs = 15000;
+    while (WiFi.status() != WL_CONNECTED && (millis() - attemptStart) < attemptWindowMs) {
+      delay(300);
+      Serial.print(".");
+    }
+    Serial.println();
     wifiPrintStatus();
+
+    if (WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+    }
   }
+
+  Serial.print("WiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
 }
 

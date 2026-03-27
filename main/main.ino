@@ -9,6 +9,8 @@ Adafruit_NeoPixel pixels(NUM_LEDS, ledPin, NEO_GRB + NEO_KHZ800);
 void wifiConnect();
 void mqttSetup();
 void mqttLoop();
+void audioTestSetup();
+void audioTestLoop();
 
 // Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
@@ -19,7 +21,8 @@ bool gNeedsUpdate = true; // Flag indicating LED update needed
 void setup() {
   Serial.begin(115200);
   delay(200);
-  wifiConnect();
+  wifiConnect();    // Block here until WiFi is connected.
+  audioTestSetup(); // Start audio subsystem only after WiFi is up.
   mqttSetup();
 
   pinMode(lightSensorPin, INPUT);
@@ -31,6 +34,7 @@ void setup() {
 
 void loop() {
   mqttLoop();
+  audioTestLoop();
 
   static int currentBrightness = 0; // Current actual brightness
   int targetBrightness = 0;         // Target brightness based on state/sensor
