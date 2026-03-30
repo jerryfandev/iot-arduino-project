@@ -20,7 +20,8 @@ bool gNeedsUpdate = true; // Flag indicating LED update needed
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(1000);
+  Serial.println("Hello World!");
   wifiConnect();    // Block here until WiFi is connected.
   audioTestSetup(); // Start audio subsystem only after WiFi is up.
   mqttSetup();

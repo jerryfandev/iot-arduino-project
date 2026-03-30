@@ -1,17 +1,19 @@
 #include <WiFi.h>
 #include "Audio.h"
 
-// I2S pin mapping for MAX98357
-#define I2S_LRC       45
-#define I2S_BCLK      47
-#define I2S_DOUT      21
+// I2S → MAX98357: BCLK, LRCLK/WS, DIN (order matches gAudio.setPinout)
+// ESP32-S3: avoid GPIO19/20 (native USB), GPIO0 (BOOT). GPIO6 is lightSensorPin in main.ino.
+#define I2S_LRC       4
+#define I2S_BCLK      5
+#define I2S_DOUT      7
 
 static Audio gAudio;
 static bool gAudioStarted = false;
 static unsigned long gLastConnectAttemptMs = 0;
 static const unsigned long kConnectRetryMs = 5000;
 
-static const char* kTestStreamUrl = "http://stream.zeno.fm/0r0xa792kwzuv";
+// static const char* kTestStreamUrl = "http://stream.zeno.fm/0r0xa792kwzuv";
+static const char* kTestStreamUrl = "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service";
 
 void audioTestSetup() {
   // Configure I2S pins for MAX98357
