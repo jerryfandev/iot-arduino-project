@@ -18,7 +18,7 @@ static const char* kTestStreamUrl = "https://stream.live.vc.bbcmedia.co.uk/bbc_w
 void audioTestSetup() {
   // Configure I2S pins for MAX98357
   gAudio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  gAudio.setVolume(12); // 0..21 (depends on library build)
+  gAudio.setVolume(18); // 0..21 (depends on library build)
 }
 
 void audioTestLoop() {

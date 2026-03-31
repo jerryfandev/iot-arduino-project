@@ -11,6 +11,8 @@ void mqttSetup();
 void mqttLoop();
 void audioTestSetup();
 void audioTestLoop();
+void geminiTestSetup();
+void geminiTestLoop();
 
 // Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
@@ -23,7 +25,8 @@ void setup() {
   delay(1000);
   Serial.println("Hello World!");
   wifiConnect();    // Block here until WiFi is connected.
-  audioTestSetup(); // Start audio subsystem only after WiFi is up.
+  // audioTestSetup(); // Disabling old audio test
+  geminiTestSetup();   // Start Gemini audio test
   mqttSetup();
 
   pinMode(lightSensorPin, INPUT);
@@ -35,7 +38,8 @@ void setup() {
 
 void loop() {
   mqttLoop();
-  audioTestLoop();
+  // audioTestLoop();
+  geminiTestLoop();
 
   static int currentBrightness = 0; // Current actual brightness
   int targetBrightness = 0;         // Target brightness based on state/sensor
