@@ -12,11 +12,11 @@
 #include <esp_random.h>
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-static const char* GEMINI_API_KEY = "AIza___________________________cfIKw";
+static const char* GEMINI_API_KEY = "AIzaS__________________________________IKw";
 static const char* GEMINI_MODEL   = "gemini-3.1-flash-live-preview";
 static const char* GEMINI_HOST    = "generativelanguage.googleapis.com";
 static const int   GEMINI_PORT    = 443;
-static const char* TEST_PROMPT    = "How is the weather in Perth tomorrow April 1, 2026?";
+static const char* TEST_PROMPT    = "How is the weather in Perth today?";
 
 // ─── I2S (MAX98357) ───────────────────────────────────────────────────────────
 #define I2S_BCLK_PIN      5
@@ -34,10 +34,17 @@ static i2s_chan_handle_t gI2sTxHandle   = NULL;
 static bool              gSetupComplete = false;
 static bool              gTextSent      = false;
 
+// Buffer to accumulate all PCM audio before playing → prevents I2S underrun between WS frames
+static uint8_t* gAudioBuf = nullptr;
+static size_t   gAudioLen = 0;
+static size_t   gAudioCap = 0;
+
 // ─── Forward declarations ─────────────────────────────────────────────────────
 static bool   wsConnect();
 static void   wsSendText(const String& json);
 static void   processFrames();
+static void   appendAudio(const uint8_t* data, size_t len);
+static void   playAllAudio();
 static void   i2sInit();
 static void   i2sDeinit();
 static void   playPCMChunk(const uint8_t* data, size_t len);
@@ -59,15 +66,39 @@ void geminiTestSetup() {
   // Send setup config right after handshake
   // Raw WS API: top-level key = "setup" (not "config")
   // responseModalities is inside generationConfig
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<768> doc;
   JsonObject setup = doc.createNestedObject("setup");
   setup["model"] = String("models/") + GEMINI_MODEL;
+
+  // --- SYSTEM INSTRUCTION ---
+  JsonObject systemInstruction = setup.createNestedObject("system_instruction");
+  JsonArray siParts = systemInstruction.createNestedArray("parts");
+  JsonObject siTextPart = siParts.createNestedObject();
+  // Vietnamese sample instruction
+  // siTextPart["text"] = "QUY TẮC BẮT BUỘC: \n"
+  //                    "1. Chỉ trả lời thông tin được hỏi. \n"
+  //                    "2. TUYỆT ĐỐI KHÔNG hỏi lại, không gợi ý, không chào hỏi dư thừa. \n"
+  //                    "3. Sau khi đưa ra thông tin, kết thúc câu trả lời ngay lập tức. \n"
+  //                    "4. Trả lời bằng giọng miền Nam Việt Nam.";
+  siTextPart["text"] = "MANDATORY RULES: \n"
+                     "1. Only answer the questions asked for information. \n"
+                     "2. Absolutely do not ask follow-up questions. \n"
+                     "3. After providing the information, end the answer immediately. \n";
+  // -------------------------------------
 
   // Google Search grounding — camelCase per proto3 JSON encoding
   JsonArray tools = setup.createNestedArray("tools");
   tools.createNestedObject().createNestedObject("googleSearch");
-  setup.createNestedObject("generationConfig")
-       .createNestedArray("responseModalities").add("AUDIO");
+  
+  // Generation Config including AUDIO modality and Aoede voice
+  JsonObject genConfig = setup.createNestedObject("generationConfig");
+  genConfig.createNestedArray("responseModalities").add("AUDIO");
+  genConfig.createNestedObject("speechConfig")
+           .createNestedObject("voiceConfig")
+           .createNestedObject("prebuiltVoiceConfig")
+           ["voiceName"] = "Aoede";
+
+
   String json;
   serializeJson(doc, json);
   Serial.printf("[GEMINI] Setup: %s\n", json.c_str());
@@ -349,8 +380,8 @@ static void processFrames() {
                 mbedtls_base64_decode(pcm, bufSize, &outLen,
                                       (const unsigned char*)b64, b64len);
                 if (outLen > 0) {
-                  Serial.printf("[GEMINI] Playing %d PCM bytes\n", (int)outLen);
-                  playPCMChunk(pcm, outLen);
+                  Serial.printf("[GEMINI] Buffering %d PCM bytes\n", (int)outLen);
+                  appendAudio(pcm, outLen);
                 }
                 free(pcm);
               }
@@ -361,11 +392,44 @@ static void processFrames() {
 
       if (sc["turnComplete"].as<bool>()) {
         Serial.println("[GEMINI] turnComplete!");
+        playAllAudio(); // Play all audio at once to prevent stuttering
         gState = GS_DONE;
         return;
       }
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio Buffering
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void appendAudio(const uint8_t* data, size_t len) {
+  if (gAudioLen + len > gAudioCap) {
+    size_t newCap = gAudioCap + max(len, (size_t)32768);
+    uint8_t* nb = (uint8_t*)realloc(gAudioBuf, newCap);
+    if (!nb) { Serial.println("[GEMINI] OOM: audio buffer"); return; }
+    gAudioBuf = nb; gAudioCap = newCap;
+  }
+  memcpy(gAudioBuf + gAudioLen, data, len);
+  gAudioLen += len;
+}
+
+// Play entire buffer continuously without gaps between frames
+static void playAllAudio() {
+  if (!gAudioBuf || gAudioLen == 0) return;
+  Serial.printf("[GEMINI] Playing total %d PCM bytes (%.1fs)\n",
+                (int)gAudioLen, (float)gAudioLen / (AUDIO_SAMPLE_RATE * 2));
+  const size_t CHUNK = 8192;
+  size_t offset = 0;
+  while (offset < gAudioLen) {
+    size_t toPlay = min(CHUNK, gAudioLen - offset);
+    playPCMChunk(gAudioBuf + offset, toPlay);
+    offset += toPlay;
+    yield();
+  }
+  free(gAudioBuf); gAudioBuf = nullptr;
+  gAudioLen = 0; gAudioCap = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
