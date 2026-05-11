@@ -1,3 +1,5 @@
+#include "ESP_I2S.h"
+#include "ESP_SR.h"
 #include <Adafruit_NeoPixel.h>
 
 constexpr uint8_t ledPin =
@@ -13,6 +15,8 @@ void mqttLoop();
 // void geminiTestSetup();
 // void geminiTestLoop();
 
+void commandsSetup();
+
 // Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
 bool gLightOn = false;
@@ -27,6 +31,7 @@ void setup() {
   wifiConnect(); // Block here until WiFi is connected.
   // geminiTestSetup(); // Start Gemini audio test
   mqttSetup();
+  commandsSetup(); // Start local voice recognition
 
   pinMode(lightSensorPin, INPUT);
 
