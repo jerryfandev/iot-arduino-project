@@ -2,8 +2,8 @@
 #include <WiFi.h>
 
 // Fill these in (or replace with your own credential loading method).
-static const char *WIFI_SSID = "";
-static const char *WIFI_PASSWORD = "";
+static const char *WIFI_SSID = "Jerry's iPhone";
+static const char *WIFI_PASSWORD = "1122334455";
 
 void checkInternet() {
   Serial.print("Checking Internet connection...");

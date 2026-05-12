@@ -15,7 +15,7 @@ static void on_sr_event(void *arg, sr_event_t event, int command_id, int phrase_
   ((ESP_SR_Class *)arg)->_sr_event(event, command_id, phrase_id);
 }
 
-ESP_SR_Class::ESP_SR_Class() : cb(NULL), i2s(NULL) {}
+ESP_SR_Class::ESP_SR_Class() : cb(NULL), audio_cb(NULL), i2s(NULL), rx_channels(0) {}
 
 ESP_SR_Class::~ESP_SR_Class() {
   end();
@@ -25,8 +25,13 @@ void ESP_SR_Class::onEvent(sr_cb event_cb) {
   cb = event_cb;
 }
 
+void ESP_SR_Class::onAudio(sr_audio_cb audio_cb_arg) {
+  audio_cb = audio_cb_arg;
+}
+
 bool ESP_SR_Class::begin(I2SClass &_i2s, const sr_cmd_t *sr_commands, size_t sr_commands_len, sr_channels_t rx_chan, sr_mode_t mode, const char *input_format) {
   i2s = &_i2s;
+  rx_channels = rx_chan + 1;
   esp_err_t err = sr_start(on_sr_fill, this, rx_chan, mode, input_format, sr_commands, sr_commands_len, on_sr_event, this);
   return (err == ESP_OK);
 }
@@ -59,7 +64,11 @@ esp_err_t ESP_SR_Class::_fill(void *out, size_t len, size_t *bytes_read, uint32_
   }
   i2s->setTimeout(timeout_ms);
   *bytes_read = i2s->readBytes((char *)out, len);
-  return (esp_err_t)i2s->lastError();
+  esp_err_t err = (esp_err_t)i2s->lastError();
+  if (err == ESP_OK && audio_cb && *bytes_read > 0) {
+    audio_cb((const int16_t *)out, *bytes_read / sizeof(int16_t), rx_channels);
+  }
+  return err;
 }
 
 ESP_SR_Class ESP_SR;
