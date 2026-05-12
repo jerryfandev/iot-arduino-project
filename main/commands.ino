@@ -56,7 +56,7 @@ extern bool gLightOn;
 #define GEMINI_I2S_PORT I2S_NUM_1
 #define AUDIO_SAMPLE_RATE 24000
 
-static const char *GEMINI_API_KEY = "AIzaSyAOxpfv0lz28Sdpt4q9Hz79uIpz07cfIKw";
+static const char *GEMINI_API_KEY = "AIzaSy_________________cfIKw";
 static const char *GEMINI_MODEL = "gemini-3.1-flash-live-preview";
 static const char *GEMINI_HOST = "generativelanguage.googleapis.com";
 static const int GEMINI_PORT = 443;
