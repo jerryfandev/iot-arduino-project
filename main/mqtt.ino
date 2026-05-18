@@ -1,4 +1,7 @@
 #include <WiFi.h>
+#ifndef MQTT_MAX_PACKET_SIZE
+#define MQTT_MAX_PACKET_SIZE 512
+#endif
 #include <PubSubClient.h>
 #include <limits.h>
 #include <time.h>
@@ -15,6 +18,10 @@ static const char* MQTT_TOPIC_SENSOR = "home/livingroom/light-sensor";
 // on-timer:  {"duration":null,"at_time":"14:30"} in Perth local time.
 static const char* MQTT_TOPIC_OFF_TIMER = "home/livingroom/light/off-timer";
 static const char* MQTT_TOPIC_ON_TIMER = "home/livingroom/light/on-timer";
+static const char* MQTT_TOPIC_OFF_TIMER_STATE =
+    "home/livingroom/light/off-timer/state";
+static const char* MQTT_TOPIC_ON_TIMER_STATE =
+    "home/livingroom/light/on-timer/state";
 
 static WiFiClient gNetClient;
 static PubSubClient gMqtt(gNetClient);
@@ -25,8 +32,16 @@ extern bool gLightSensorEnabled;
 
 static bool gOffAfterActive = false;
 static unsigned long gOffAfterAtMillis = 0;
+static unsigned long gOffAfterDurationSeconds = 0;
+static time_t gOffAfterAtEpoch = 0;
+static bool gOffTimerStateNeedsPublish = false;
 static bool gOnAtActive = false;
+static String gOnAtClock = "";
 static time_t gOnAtEpoch = 0;
+static bool gOnTimerStateNeedsPublish = false;
+
+static void publishOffTimerStateIfNeeded();
+static void publishOnTimerStateIfNeeded();
 
 static bool isSyncedTime() {
   return time(nullptr) > 1700000000; // Well past ESP32's 1970 default.
@@ -94,29 +109,43 @@ static void printLocalSchedule(time_t target) {
   Serial.println(buf);
 }
 
-static void clearOffAfterTimer(const char* reason) {
-  if (!gOffAfterActive) return;
+static String formatLocalSchedule(time_t target) {
+  if (target == 0) return "null";
 
+  struct tm localTime;
+  localtime_r(&target, &localTime);
+
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &localTime);
+  return String("\"") + buf + "\"";
+}
+
+static void clearOffAfterTimer(const char* reason) {
   gOffAfterActive = false;
+  gOffAfterDurationSeconds = 0;
+  gOffAfterAtEpoch = 0;
+  gOffTimerStateNeedsPublish = true;
   Serial.print("[MQTT] OFF timer cancelled");
   if (reason) {
     Serial.print(": ");
     Serial.print(reason);
   }
   Serial.println();
+  publishOffTimerStateIfNeeded();
 }
 
 static void clearOnAtTimer(const char* reason) {
-  if (!gOnAtActive) return;
-
   gOnAtActive = false;
+  gOnAtClock = "";
   gOnAtEpoch = 0;
+  gOnTimerStateNeedsPublish = true;
   Serial.print("[MQTT] ON schedule cancelled");
   if (reason) {
     Serial.print(": ");
     Serial.print(reason);
   }
   Serial.println();
+  publishOnTimerStateIfNeeded();
 }
 
 static bool readJsonValue(const String& msg, const char* key, String& value) {
@@ -190,10 +219,20 @@ static void handleOffTimerPayload(const String& msg) {
   }
 
   gOffAfterAtMillis = millis() + durationSeconds * 1000UL;
+  gOffAfterDurationSeconds = durationSeconds;
+  gOffAfterAtEpoch = isSyncedTime() ? time(nullptr) + durationSeconds : 0;
   gOffAfterActive = true;
+  gOffTimerStateNeedsPublish = true;
   Serial.print("[MQTT] Light will turn OFF after ");
   Serial.print(durationSeconds);
-  Serial.println(" seconds");
+  Serial.print(" seconds");
+  if (gOffAfterAtEpoch != 0) {
+    Serial.print(" at ");
+    printLocalSchedule(gOffAfterAtEpoch);
+  } else {
+    Serial.println();
+  }
+  publishOffTimerStateIfNeeded();
 }
 
 static void handleOnTimerPayload(const String& msg) {
@@ -226,9 +265,12 @@ static void handleOnTimerPayload(const String& msg) {
   }
 
   gOnAtEpoch = target;
+  gOnAtClock = atTime;
   gOnAtActive = true;
+  gOnTimerStateNeedsPublish = true;
   Serial.print("[MQTT] Light will turn ON at ");
   printLocalSchedule(target);
+  publishOnTimerStateIfNeeded();
 }
 
 static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
@@ -283,6 +325,82 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+static void publishLightStateIfNeeded() {
+  if (!gNeedsUpdate || !gMqtt.connected()) return;
+
+  const char* state = gLightOn ? "ON" : "OFF";
+  if (gMqtt.publish(MQTT_TOPIC, state, true)) {
+    gNeedsUpdate = false;
+    Serial.print("[MQTT] Published light state => ");
+    Serial.println(state);
+  } else {
+    Serial.print("[MQTT] Failed to publish light state => ");
+    Serial.println(state);
+  }
+}
+
+static void publishOffTimerStateIfNeeded() {
+  if (!gOffTimerStateNeedsPublish || !gMqtt.connected()) return;
+
+  String payload;
+  if (gOffAfterActive) {
+    payload.reserve(128);
+    payload = "{\"active\":true,\"duration\":";
+    payload += gOffAfterDurationSeconds;
+    payload += ",\"trigger_epoch\":";
+    if (gOffAfterAtEpoch != 0) {
+      payload += static_cast<unsigned long>(gOffAfterAtEpoch);
+    } else {
+      payload += "null";
+    }
+    payload += ",\"trigger_at\":";
+    payload += formatLocalSchedule(gOffAfterAtEpoch);
+    payload += "}";
+  } else {
+    payload =
+        "{\"active\":false,\"duration\":null,\"trigger_epoch\":null,"
+        "\"trigger_at\":null}";
+  }
+
+  if (gMqtt.publish(MQTT_TOPIC_OFF_TIMER_STATE, payload.c_str(), true)) {
+    gOffTimerStateNeedsPublish = false;
+    Serial.print("[MQTT] Published OFF timer state => ");
+    Serial.println(payload);
+  } else {
+    Serial.print("[MQTT] Failed to publish OFF timer state => ");
+    Serial.println(payload);
+  }
+}
+
+static void publishOnTimerStateIfNeeded() {
+  if (!gOnTimerStateNeedsPublish || !gMqtt.connected()) return;
+
+  String payload;
+  if (gOnAtActive) {
+    payload.reserve(128);
+    payload = "{\"active\":true,\"at_time\":\"";
+    payload += gOnAtClock;
+    payload += "\",\"trigger_epoch\":";
+    payload += static_cast<unsigned long>(gOnAtEpoch);
+    payload += ",\"trigger_at\":";
+    payload += formatLocalSchedule(gOnAtEpoch);
+    payload += "}";
+  } else {
+    payload =
+        "{\"active\":false,\"at_time\":null,\"trigger_epoch\":null,"
+        "\"trigger_at\":null}";
+  }
+
+  if (gMqtt.publish(MQTT_TOPIC_ON_TIMER_STATE, payload.c_str(), true)) {
+    gOnTimerStateNeedsPublish = false;
+    Serial.print("[MQTT] Published ON timer state => ");
+    Serial.println(payload);
+  } else {
+    Serial.print("[MQTT] Failed to publish ON timer state => ");
+    Serial.println(payload);
+  }
+}
+
 static void mqttEnsureConnected() {
   if (gMqtt.connected()) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -304,6 +422,8 @@ static void mqttEnsureConnected() {
     gMqtt.subscribe(MQTT_TOPIC_SENSOR);
     gMqtt.subscribe(MQTT_TOPIC_OFF_TIMER);
     gMqtt.subscribe(MQTT_TOPIC_ON_TIMER);
+    gOffTimerStateNeedsPublish = true;
+    gOnTimerStateNeedsPublish = true;
     return;
   }
 
@@ -327,6 +447,9 @@ void mqttLoop() {
   if (gOffAfterActive &&
       static_cast<long>(millis() - gOffAfterAtMillis) >= 0) {
     gOffAfterActive = false;
+    gOffAfterDurationSeconds = 0;
+    gOffAfterAtEpoch = 0;
+    gOffTimerStateNeedsPublish = true;
     gLightOn = false;
     gNeedsUpdate = true;
     Serial.println("[MQTT] OFF timer fired");
@@ -334,9 +457,15 @@ void mqttLoop() {
 
   if (gOnAtActive && isSyncedTime() && time(nullptr) >= gOnAtEpoch) {
     gOnAtActive = false;
+    gOnAtClock = "";
     gOnAtEpoch = 0;
+    gOnTimerStateNeedsPublish = true;
     gLightOn = true;
     gNeedsUpdate = true;
     Serial.println("[MQTT] ON schedule fired");
   }
+
+  publishLightStateIfNeeded();
+  publishOffTimerStateIfNeeded();
+  publishOnTimerStateIfNeeded();
 }
