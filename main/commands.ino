@@ -810,7 +810,7 @@ void openGeminiWebSocket() {
   JsonArray siParts = systemInstruction.createNestedArray("parts");
   siParts.createNestedObject()["text"] =
       "MANDATORY RULES:\n"
-      "1. Only answer the user's request.\n"
+      "1. Only answer the user's request as short as possible, no more than 30 words.\n"
       "2. Absolutely do not ask follow-up questions.\n"
       "3. After providing the information, end the answer immediately.\n";
 
