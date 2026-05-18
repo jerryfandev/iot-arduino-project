@@ -10,6 +10,7 @@ constexpr uint8_t lightSensorPin = 6; // Digital light sensor pin
 Adafruit_NeoPixel pixels(NUM_LEDS, ledPin, NEO_GRB + NEO_KHZ800);
 
 void wifiConnect();
+void timeSetup();
 void mqttSetup();
 void mqttLoop();
 
@@ -28,6 +29,7 @@ void setup() {
   delay(1000);
   Serial.println("Hello ESP32-S3!");
   wifiConnect(); // Block here until WiFi is connected.
+  timeSetup();   // Perth/AWST clock for scheduled MQTT commands.
   mqttSetup();
   commandsSetup(); // Start local voice recognition
 
