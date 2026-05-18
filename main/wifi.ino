@@ -1,9 +1,11 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <time.h>
 
 // Fill these in (or replace with your own credential loading method).
-static const char *WIFI_SSID = "";
-static const char *WIFI_PASSWORD = "";
+static const char *WIFI_SSID = "Jerry's iPhone";
+static const char *WIFI_PASSWORD = "1122334455";
+static const char *DEVICE_TZ = "AWST-8"; // POSIX TZ for Perth/GMT+8.
 
 void checkInternet() {
   Serial.print("Checking Internet connection...");
@@ -66,4 +68,27 @@ void wifiConnect() {
   Serial.println("-------------------------");
   checkInternet();
   Serial.println("-------------------------");
+}
+
+void timeSetup() {
+  setenv("TZ", DEVICE_TZ, 1);
+  tzset();
+  configTzTime(DEVICE_TZ, "pool.ntp.org", "time.google.com",
+               "time.nist.gov");
+
+  Serial.print("Syncing time for Perth/GMT+8");
+  struct tm timeInfo;
+  for (int i = 0; i < 15; i++) {
+    if (getLocalTime(&timeInfo, 1000)) {
+      char buf[32];
+      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &timeInfo);
+      Serial.print("\nTime synced: ");
+      Serial.println(buf);
+      return;
+    }
+    Serial.print(".");
+  }
+
+  Serial.println("\nTime sync not ready yet; scheduled HH:mm commands will wait "
+                 "for NTP.");
 }

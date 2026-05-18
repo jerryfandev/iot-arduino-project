@@ -1,3 +1,5 @@
+#include "ESP_I2S.h"
+#include "ESP_SR.h"
 #include <Adafruit_NeoPixel.h>
 
 constexpr uint8_t ledPin =
@@ -8,10 +10,12 @@ constexpr uint8_t lightSensorPin = 6; // Digital light sensor pin
 Adafruit_NeoPixel pixels(NUM_LEDS, ledPin, NEO_GRB + NEO_KHZ800);
 
 void wifiConnect();
+void timeSetup();
 void mqttSetup();
 void mqttLoop();
-// void geminiTestSetup();
-// void geminiTestLoop();
+
+void commandsSetup();
+void commandsLoop();
 
 // Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
@@ -25,8 +29,9 @@ void setup() {
   delay(1000);
   Serial.println("Hello ESP32-S3!");
   wifiConnect(); // Block here until WiFi is connected.
-  // geminiTestSetup(); // Start Gemini audio test
+  timeSetup();   // Perth/AWST clock for scheduled MQTT commands.
   mqttSetup();
+  commandsSetup(); // Start local voice recognition
 
   pinMode(lightSensorPin, INPUT);
 
@@ -37,7 +42,7 @@ void setup() {
 
 void loop() {
   mqttLoop();
-  // geminiTestLoop();
+  commandsLoop(); // Give CPU to WebSocket & Voice Processing
 
   static int currentBrightness = 0; // Current actual brightness
   int targetBrightness = 0;         // Target brightness based on state/sensor

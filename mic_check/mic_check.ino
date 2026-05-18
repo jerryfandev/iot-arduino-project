@@ -29,13 +29,13 @@
 #define VU_WIDTH 40 // VU bar width
 #define PRINT_MS 80 // Print to Serial every 80ms
 // Only print when "voice" exceeds this threshold to avoid spam
-#define PRINT_THRESHOLD 800000
+#define PRINT_THRESHOLD 10000
 // If still above threshold, only reprint after this interval (ms)
 #define ABOVE_COOLDOWN_MS 300
 
 // Record WAV (trigger by sending 'r' over Serial)
-#define REC_SECONDS 3
-#define WAV_BITS_PER_SAMPLE 24
+#define REC_SECONDS 10
+#define WAV_BITS_PER_SAMPLE 16
 #define WAV_CHANNELS 1
 
 // ── Globals ───────────────────────────
@@ -87,78 +87,99 @@ static void writeWavHeader(uint8_t *hdr, uint32_t dataBytes) {
   hdr[43] = (uint8_t)((dataBytes >> 24) & 0xFF);
 }
 
-static void dumpWavBase64(const int16_t *pcm, uint32_t samples) {
-  const uint32_t dataBytes = samples * sizeof(int16_t);
-  uint8_t wavHdr[44];
-  writeWavHeader(wavHdr, dataBytes);
+// ── Streaming Base64 Logic ───────────────────────────
+static uint8_t g_streamBuf[3000]; // 3000 bytes = perfectly divisible by 3 for Base64
+static int g_streamIdx = 0;
+static int g_charCount = 0; // For 76 char line breaks
 
-  const size_t totalBytes = sizeof(wavHdr) + dataBytes;
-  const size_t b64Cap = ((totalBytes + 2) / 3) * 4 + 1;
-  uint8_t *b64 = (uint8_t *)malloc(b64Cap);
-  if (!b64) {
-    Serial.println("[REC] OOM (base64 buffer)");
-    return;
+static void streamByte(uint8_t b) {
+  g_streamBuf[g_streamIdx++] = b;
+  if (g_streamIdx == 3000) {
+    size_t outLen = 0;
+    unsigned char b64[4001]; // 3000 bytes of input = exactly 4000 characters of base64
+    mbedtls_base64_encode(b64, sizeof(b64), &outLen, g_streamBuf, 3000);
+    for (size_t i = 0; i < outLen; i++) {
+        Serial.print((char)b64[i]);
+        g_charCount++;
+        if (g_charCount >= 76) {
+            Serial.println();
+            g_charCount = 0;
+        }
+    }
+    g_streamIdx = 0;
   }
+}
 
-  uint8_t *blob = (uint8_t *)malloc(totalBytes);
-  if (!blob) {
-    free(b64);
-    Serial.println("[REC] OOM (wav blob)");
-    return;
+static void flushStream() {
+  if (g_streamIdx > 0) {
+    size_t outLen = 0;
+    size_t b64Cap = ((g_streamIdx + 2) / 3) * 4 + 1;
+    unsigned char *b64 = (unsigned char *)malloc(b64Cap);
+    if(b64) {
+      mbedtls_base64_encode(b64, b64Cap, &outLen, g_streamBuf, g_streamIdx);
+      for (size_t i = 0; i < outLen; i++) {
+          Serial.print((char)b64[i]);
+          g_charCount++;
+          if (g_charCount >= 76) {
+              Serial.println();
+              g_charCount = 0;
+          }
+      }
+      free(b64);
+    }
+    g_streamIdx = 0;
   }
-  memcpy(blob, wavHdr, sizeof(wavHdr));
-  memcpy(blob + sizeof(wavHdr), (const uint8_t *)pcm, dataBytes);
-
-  size_t outLen = 0;
-  int rc = mbedtls_base64_encode(b64, b64Cap, &outLen, blob, totalBytes);
-  free(blob);
-  if (rc != 0) {
-    free(b64);
-    Serial.printf("[REC] base64 encode failed: %d\n", rc);
-    return;
-  }
-
-  Serial.println("-----BEGIN_WAV_BASE64-----");
-  // Print in manageable lines for copy/paste
-  const size_t LINE = 76;
-  for (size_t i = 0; i < outLen; i += LINE) {
-    size_t n = (outLen - i > LINE) ? LINE : (outLen - i);
-    Serial.write(b64 + i, n);
-    Serial.println();
-  }
-  Serial.println("-----END_WAV_BASE64-----");
-  free(b64);
 }
 
 static void recordAndDumpWav() {
   const uint32_t samplesTarget = REC_SECONDS * SAMPLE_RATE;
-  int16_t *pcm = (int16_t *)malloc(samplesTarget * sizeof(int16_t));
-  if (!pcm) {
-    Serial.println("[REC] OOM (pcm buffer)");
-    return;
-  }
+  const uint32_t dataBytes = samplesTarget * sizeof(int16_t);
 
   Serial.printf("[REC] Recording %ds... (say something)\n", REC_SECONDS);
+  g_streamIdx = 0;
+  g_charCount = 0;
+  
+  Serial.println("-----BEGIN_WAV_BASE64-----");
+  
+  // 1. Stream WAV header
+  uint8_t wavHdr[44];
+  writeWavHeader(wavHdr, dataBytes);
+  for(int i = 0; i < 44; i++) {
+    streamByte(wavHdr[i]);
+  }
+
+  // 2. Record & Stream in real-time
   uint32_t written = 0;
   while (written < samplesTarget) {
     size_t bytesRead = 0;
-    esp_err_t r =
-        i2s_channel_read(gMicHandle, gBuf, BUFFER_SAMPLES * sizeof(int32_t),
-                         &bytesRead, pdMS_TO_TICKS(200));
-    if (r != ESP_OK || bytesRead == 0)
-      continue;
+    esp_err_t r = i2s_channel_read(gMicHandle, gBuf, BUFFER_SAMPLES * sizeof(int32_t),
+                                   &bytesRead, pdMS_TO_TICKS(200));
+    if (r != ESP_OK || bytesRead == 0) continue;
+    
     int n = (int)(bytesRead / sizeof(int32_t));
     for (int i = 0; i < n && written < samplesTarget; i++) {
-      // 24-bit left-justified; >>16 gives signed 16-bit PCM
-      pcm[written++] = (int16_t)(gBuf[i] >> 16);
+      // Reduced volume amplifier to 3x (8x was too aggressive and caused clipping)
+      int32_t val = (gBuf[i] >> 16) * 3; 
+      if (val > 32767) val = 32767;
+      if (val < -32768) val = -32768;
+      
+      int16_t sample = (int16_t)val;
+      
+      // Little Endian output
+      streamByte(sample & 0xFF);
+      streamByte((sample >> 8) & 0xFF);
+      written++;
     }
     yield();
   }
-  Serial.println("[REC] Done. Encoding WAV to Base64...");
-  dumpWavBase64(pcm, samplesTarget);
-  free(pcm);
-  Serial.println("[REC] Tip: copy the base64 block and decode to a .wav on "
-                 "your computer.");
+
+  // Flush any remaining bytes in the buffer
+  flushStream();
+  if (g_charCount > 0) Serial.println(); // newline after final characters
+  
+  Serial.println("-----END_WAV_BASE64-----");
+  Serial.println("[REC] Done!");
+  Serial.println("[REC] Tip: copy the base64 block and decode to a .wav on your computer.");
 }
 
 // ─────────────────────────────────────
