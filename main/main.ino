@@ -2,10 +2,10 @@
 #include "ESP_SR.h"
 #include <Adafruit_NeoPixel.h>
 
-#include <Wire.h>
 #include <DFRobot_VEML7700.h>
+#include <Wire.h>
 
-constexpr uint8_t ledPin = 3; 
+constexpr uint8_t ledPin = 3;
 
 constexpr int I2C_SDA_PIN = 1;
 constexpr int I2C_SCL_PIN = 2;
@@ -26,22 +26,26 @@ void commandsLoop();
 void occupancySetup();
 void occupancyLoop();
 
-// Light commands received from MQTT topic `home/livingroom/light/set` ("ON"/"OFF").
-// Light state is published to `home/livingroom/light/state`.
+// Light commands received from MQTT topic `home/livingroom/light/set`
+// ("ON"/"OFF"). Light state is published to `home/livingroom/light/state`.
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
 bool gLightOn = false;
 bool gLightSensorEnabled =
     false; // Controlled by MQTT topic `home/livingroom/light-sensor`
+bool gMotionSensorEnabled =
+    false; // Controlled by MQTT topic `home/livingroom/motion-sensor`
 bool gNeedsUpdate = true; // Flag indicating LED update needed
+unsigned long gLastExternalControlTime = 0;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Hello ESP32-S3!");
+  gLastExternalControlTime = millis() - 60000;
   wifiConnect(); // Block here until WiFi is connected.
   timeSetup();   // Perth/AWST clock for scheduled MQTT commands.
   mqttSetup();
-  commandsSetup(); // Start local voice recognition
+  commandsSetup();  // Start local voice recognition
   occupancySetup(); // Start multimodal occupancy sensing
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -54,7 +58,7 @@ void setup() {
 
 void loop() {
   mqttLoop();
-  commandsLoop(); // Give CPU to WebSocket & Voice Processing
+  commandsLoop();  // Give CPU to WebSocket & Voice Processing
   occupancyLoop(); // Process occupancy rules and auto-control light
 
   static int currentBrightness = 0; // Current actual brightness
@@ -65,7 +69,7 @@ void loop() {
     if (gLightSensorEnabled) {
       float lux = 0.0f;
       veml.getALSLux(lux);
-      
+
       // Map Lux to Brightness (0 Lux -> 255, ~500 Lux -> 10)
       // The brighter the environment, the dimmer the LED
       if (lux > 500) {

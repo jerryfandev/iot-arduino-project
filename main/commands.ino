@@ -34,6 +34,7 @@
 
 extern bool gLightOn;
 extern bool gNeedsUpdate;
+extern unsigned long gLastExternalControlTime;
 
 // ── Pin Definitions (INMP441 on ESP32-S3) ──────────────────────
 #define I2S_PIN_BCK 12 // SCK  (serial clock / bit clock)
@@ -196,12 +197,14 @@ void onSrEvent(sr_event_t event, int command_id, int phrase_id) {
         gLightOn = true;
         gNeedsUpdate = true;
       }
+      gLastExternalControlTime = millis();
       Serial.println("     Action     : Light turned ON via Voice");
     } else if (command_id == SR_CMD_LIGHT_OFF) {
       if (gLightOn) {
         gLightOn = false;
         gNeedsUpdate = true;
       }
+      gLastExternalControlTime = millis();
       Serial.println("     Action     : Light turned OFF via Voice");
     }
 
