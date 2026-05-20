@@ -297,9 +297,17 @@ static void appendCommandAudio(const uint8_t *data, size_t len) {
   gCommandAudioLen += len;
 }
 
+void occupancyProcessAudio(const int16_t *samples, size_t sample_count, uint8_t channels);
+
 static void onSrAudio(const int16_t *samples, size_t sample_count,
                       uint8_t channels) {
-  if (!gCaptureCommandAudio || !samples || channels == 0)
+  if (!samples || channels == 0)
+    return;
+
+  // Feed raw audio to occupancy processing engine
+  occupancyProcessAudio(samples, sample_count, channels);
+
+  if (!gCaptureCommandAudio)
     return;
 
   size_t frames = sample_count / channels;

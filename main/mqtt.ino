@@ -10,8 +10,11 @@
 static const char* MQTT_HOST = "iotsmartlight.space";
 static const uint16_t MQTT_PORT = 1883;
 
-// Topic must match Web dashboard
-static const char* MQTT_TOPIC = "home/livingroom/light";
+// Split topics to avoid command/state feedback loops.
+// Web UI should publish commands to /set and subscribe to /state.
+static const char* MQTT_TOPIC_LIGHT_SET = "home/livingroom/light/set";
+static const char* MQTT_TOPIC_LIGHT_STATE = "home/livingroom/light/state";
+static const char* MQTT_TOPIC_LIGHT_LEGACY = "home/livingroom/light";
 static const char* MQTT_TOPIC_SENSOR = "home/livingroom/light-sensor";
 // Frontend timer payloads:
 // off-timer: {"duration":300,"at_time":null} where duration is seconds.
@@ -22,6 +25,7 @@ static const char* MQTT_TOPIC_OFF_TIMER_STATE =
     "home/livingroom/light/off-timer/state";
 static const char* MQTT_TOPIC_ON_TIMER_STATE =
     "home/livingroom/light/on-timer/state";
+static const char* MQTT_TOPIC_OCCUPANCY = "home/livingroom/occupancy";
 
 static WiFiClient gNetClient;
 static PubSubClient gMqtt(gNetClient);
@@ -287,7 +291,10 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   String commandMsg = msg;
   commandMsg.toUpperCase();
 
-  if (topicStr == MQTT_TOPIC) {
+  if (topicStr == MQTT_TOPIC_LIGHT_SET || topicStr == MQTT_TOPIC_LIGHT_LEGACY) {
+    if (topicStr == MQTT_TOPIC_LIGHT_LEGACY) {
+      Serial.println("[MQTT] Warning: legacy light topic used (consider /set)");
+    }
     if (commandMsg == "ON") {
       if (!gLightOn) {
         gLightOn = true;
@@ -329,7 +336,7 @@ static void publishLightStateIfNeeded() {
   if (!gNeedsUpdate || !gMqtt.connected()) return;
 
   const char* state = gLightOn ? "ON" : "OFF";
-  if (gMqtt.publish(MQTT_TOPIC, state, true)) {
+  if (gMqtt.publish(MQTT_TOPIC_LIGHT_STATE, state, true)) {
     gNeedsUpdate = false;
     Serial.print("[MQTT] Published light state => ");
     Serial.println(state);
@@ -418,7 +425,8 @@ static void mqttEnsureConnected() {
   // No username/password (adjust if your broker requires auth)
   if (gMqtt.connect(clientId.c_str())) {
     Serial.println("[MQTT] Connected");
-    gMqtt.subscribe(MQTT_TOPIC);
+    gMqtt.subscribe(MQTT_TOPIC_LIGHT_SET);
+    gMqtt.subscribe(MQTT_TOPIC_LIGHT_LEGACY);
     gMqtt.subscribe(MQTT_TOPIC_SENSOR);
     gMqtt.subscribe(MQTT_TOPIC_OFF_TIMER);
     gMqtt.subscribe(MQTT_TOPIC_ON_TIMER);
@@ -469,3 +477,17 @@ void mqttLoop() {
   publishOffTimerStateIfNeeded();
   publishOnTimerStateIfNeeded();
 }
+
+void mqttPublishOccupancy(int occupied) {
+  if (!gMqtt.connected()) return;
+
+  const char* state = occupied ? "1" : "0";
+  if (gMqtt.publish(MQTT_TOPIC_OCCUPANCY, state, true)) {
+    Serial.print("[MQTT] Published occupancy => ");
+    Serial.println(state);
+  } else {
+    Serial.print("[MQTT] Failed to publish occupancy => ");
+    Serial.println(state);
+  }
+}
+

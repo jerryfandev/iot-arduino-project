@@ -23,7 +23,11 @@ void mqttLoop();
 void commandsSetup();
 void commandsLoop();
 
-// Light state received from MQTT topic `home/livingroom/light` ("ON"/"OFF").
+void occupancySetup();
+void occupancyLoop();
+
+// Light commands received from MQTT topic `home/livingroom/light/set` ("ON"/"OFF").
+// Light state is published to `home/livingroom/light/state`.
 // Default OFF, only turn ON and use ambient sensor when ON command is received.
 bool gLightOn = false;
 bool gLightSensorEnabled =
@@ -38,6 +42,7 @@ void setup() {
   timeSetup();   // Perth/AWST clock for scheduled MQTT commands.
   mqttSetup();
   commandsSetup(); // Start local voice recognition
+  occupancySetup(); // Start multimodal occupancy sensing
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   veml.begin();
@@ -50,6 +55,7 @@ void setup() {
 void loop() {
   mqttLoop();
   commandsLoop(); // Give CPU to WebSocket & Voice Processing
+  occupancyLoop(); // Process occupancy rules and auto-control light
 
   static int currentBrightness = 0; // Current actual brightness
   int targetBrightness = 0;         // Target brightness based on state/sensor
