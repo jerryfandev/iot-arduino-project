@@ -24,6 +24,7 @@ static const unsigned long SAMPLE_INTERVAL_MS = 200;
 // --- Radar State ---
 static bool radarOccupied = false;
 static bool radarFrameReceived = false;
+static bool lastRadarOccupied = false;
 
 // --- Occupancy Countdown Timer ---
 // A single non-blocking timer starts when motion OR sound turns the light on.
@@ -43,6 +44,7 @@ static int line_pos = 0;
 // --- Audio energy accumulator (fed from commands.ino onSrAudio) ---
 static volatile int64_t audioSampleSum = 0;
 static volatile int32_t audioSampleCount = 0;
+static bool soundWasAboveThreshold = false;
 
 static unsigned long audioFirstCallTime = 0; // Set on first audio callback
 static bool audioFirstCallDone = false;
@@ -68,8 +70,10 @@ static void drainSensorInputs() {
   line_pos = 0;
   radarOccupied = false;
   radarFrameReceived = false;
+  lastRadarOccupied = false;
   audioSampleSum = 0;
   audioSampleCount = 0;
+  soundWasAboveThreshold = false;
 }
 
 static void publishOccupancyIfChanged(int occupied) {
@@ -142,6 +146,8 @@ void occupancySetup() {
   resetOccupancyTimer();
   radarOccupied = false;
   radarFrameReceived = false;
+  lastRadarOccupied = false;
+  soundWasAboveThreshold = false;
   lastLightOn = gLightOn;
   lastExternalControlTimeSeen = gLastExternalControlTime;
 
@@ -235,10 +241,12 @@ void occupancyLoop() {
     if (!motionInputArmed) {
       if (radarFrameReceived) {
         motionInputArmed = true;
+        lastRadarOccupied = false;
         Serial.println("[Occupancy] Motion input armed after first radar frame");
       }
     } else {
-      motionTriggered = radarOccupied;
+      motionTriggered = radarOccupied && !lastRadarOccupied;
+      lastRadarOccupied = radarOccupied;
     }
 
     // B. SOUND DETECTOR
@@ -253,7 +261,9 @@ void occupancyLoop() {
       avgAmplitude = (int32_t)(localSum / localCount);
     }
 
-    bool soundTriggered = (avgAmplitude > VOICE_THRESHOLD_16BIT);
+    bool soundAboveThreshold = (avgAmplitude > VOICE_THRESHOLD_16BIT);
+    bool soundTriggered = soundAboveThreshold && !soundWasAboveThreshold;
+    soundWasAboveThreshold = soundAboveThreshold;
     bool anySensorTriggered = motionTriggered || soundTriggered;
 
     // C. STATE MACHINE
