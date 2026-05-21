@@ -22,6 +22,7 @@ void mqttLoop();
 
 void commandsSetup();
 void commandsLoop();
+// void commandsPlayFailureMessage();
 
 void occupancySetup();
 void occupancyLoop();
@@ -45,7 +46,9 @@ void setup() {
   wifiConnect(); // Block here until WiFi is connected.
   timeSetup();   // Perth/AWST clock for scheduled MQTT commands.
   mqttSetup();
-  commandsSetup();  // Start local voice recognition
+  commandsSetup(); // Start local voice recognition
+  // Uncomment to test local failure message playback on boot.
+  // commandsPlayFailureMessage();
   occupancySetup(); // Start multimodal occupancy sensing
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);

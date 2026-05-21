@@ -30,7 +30,11 @@
 #include <WiFiClientSecure.h>
 #include <driver/i2s_std.h>
 #include <esp_random.h>
+#include <math.h>
 #include <mbedtls/base64.h>
+#include <pgmspace.h>
+
+#include "failure_message_audio.h"
 
 extern bool gLightOn;
 extern bool gNeedsUpdate;
@@ -122,6 +126,8 @@ static void onSrAudio(const int16_t *samples, size_t sample_count,
                       uint8_t channels);
 static bool sendBufferedCommandToGemini();
 static void i2sInitSpeaker();
+static void playWakeBeep();
+static void playLocalFailureMessage();
 static bool wsConnect();
 static void wsSendText(const String &json);
 static bool wsReadPayload(uint64_t payloadLen, uint8_t **outBuf,
@@ -141,6 +147,9 @@ void onSrEvent(sr_event_t event, int command_id, int phrase_id) {
     // (With a single mic on a stereo bus, SR_EVENT_WAKEWORD_CHANNEL
     //  may not fire, so we must not rely on it.)
     ESP_SR.setMode(SR_MODE_COMMAND);
+
+    gCaptureCommandAudio = false;
+    playWakeBeep();
 
     // Open websocket to Gemini Live API in parallel
     resetCommandAudio();
@@ -365,6 +374,122 @@ static void playPCMChunk(const uint8_t *data, size_t len) {
   i2s_channel_write(gI2sTxHandle, data, len, &written, portMAX_DELAY);
 }
 
+static uint16_t readProgmemLe16(const uint8_t *data, size_t offset) {
+  return (uint16_t)pgm_read_byte(data + offset) |
+         ((uint16_t)pgm_read_byte(data + offset + 1) << 8);
+}
+
+static uint32_t readProgmemLe32(const uint8_t *data, size_t offset) {
+  return (uint32_t)pgm_read_byte(data + offset) |
+         ((uint32_t)pgm_read_byte(data + offset + 1) << 8) |
+         ((uint32_t)pgm_read_byte(data + offset + 2) << 16) |
+         ((uint32_t)pgm_read_byte(data + offset + 3) << 24);
+}
+
+static bool progmemChunkIdEquals(const uint8_t *data, size_t offset,
+                                 const char *id) {
+  for (size_t i = 0; i < 4; i++) {
+    if ((char)pgm_read_byte(data + offset + i) != id[i])
+      return false;
+  }
+  return true;
+}
+
+static void playLocalFailureMessage() {
+  if (!gI2sTxHandle)
+    return;
+
+  if (gFailureMessageWavLen < 44 ||
+      !progmemChunkIdEquals(gFailureMessageWav, 0, "RIFF") ||
+      !progmemChunkIdEquals(gFailureMessageWav, 8, "WAVE")) {
+    Serial.println("[GEMINI] Local failure WAV is invalid");
+    return;
+  }
+
+  uint16_t audioFormat = 0;
+  uint16_t channels = 0;
+  uint32_t sampleRate = 0;
+  uint16_t bitsPerSample = 0;
+  size_t dataOffset = 0;
+  size_t dataLen = 0;
+
+  size_t offset = 12;
+  while (offset + 8 <= gFailureMessageWavLen) {
+    size_t chunkSize = (size_t)readProgmemLe32(gFailureMessageWav, offset + 4);
+    size_t chunkData = offset + 8;
+    if (chunkData + chunkSize > gFailureMessageWavLen)
+      break;
+
+    if (progmemChunkIdEquals(gFailureMessageWav, offset, "fmt ")) {
+      audioFormat = readProgmemLe16(gFailureMessageWav, chunkData);
+      channels = readProgmemLe16(gFailureMessageWav, chunkData + 2);
+      sampleRate = readProgmemLe32(gFailureMessageWav, chunkData + 4);
+      bitsPerSample = readProgmemLe16(gFailureMessageWav, chunkData + 14);
+    } else if (progmemChunkIdEquals(gFailureMessageWav, offset, "data")) {
+      dataOffset = chunkData;
+      dataLen = chunkSize;
+    }
+
+    offset = chunkData + chunkSize + (chunkSize & 1);
+  }
+
+  if (audioFormat != 1 || channels != 1 || sampleRate != AUDIO_SAMPLE_RATE ||
+      bitsPerSample != 16 || dataOffset == 0 || dataLen == 0) {
+    Serial.println("[GEMINI] Local failure WAV format is unsupported");
+    return;
+  }
+
+  Serial.println("[GEMINI] Playing local failure message.");
+  const size_t chunkSize = 1024;
+  uint8_t chunk[chunkSize];
+  size_t played = 0;
+  while (played < dataLen) {
+    size_t toPlay = min(chunkSize, dataLen - played);
+    for (size_t i = 0; i < toPlay; i++) {
+      chunk[i] = pgm_read_byte(gFailureMessageWav + dataOffset + played + i);
+    }
+    playPCMChunk(chunk, toPlay);
+    played += toPlay;
+    yield();
+  }
+}
+
+void commandsPlayFailureMessage() { playLocalFailureMessage(); }
+
+static void playWakeBeep() {
+  if (!gI2sTxHandle)
+    return;
+
+  const int durationMs = 80;
+  const int frequencyHz = 1200;
+  const float amplitude = 5000.0f;
+  const float twoPi = 6.28318530718f;
+  const size_t totalSamples = (AUDIO_SAMPLE_RATE * durationMs) / 1000;
+  const size_t fadeSamples = (AUDIO_SAMPLE_RATE * 5) / 1000;
+  const size_t chunkSamples = 128;
+  int16_t samples[chunkSamples];
+
+  size_t generated = 0;
+  while (generated < totalSamples) {
+    size_t count = min(chunkSamples, totalSamples - generated);
+    for (size_t i = 0; i < count; i++) {
+      size_t sampleIndex = generated + i;
+      float envelope = 1.0f;
+      if (sampleIndex < fadeSamples) {
+        envelope = (float)sampleIndex / fadeSamples;
+      } else if (totalSamples - sampleIndex < fadeSamples) {
+        envelope = (float)(totalSamples - sampleIndex) / fadeSamples;
+      }
+
+      float phase = twoPi * frequencyHz * sampleIndex / AUDIO_SAMPLE_RATE;
+      samples[i] = (int16_t)(sinf(phase) * amplitude * envelope);
+    }
+    playPCMChunk((const uint8_t *)samples, count * sizeof(int16_t));
+    generated += count;
+    yield();
+  }
+}
+
 static void appendAudio(const uint8_t *data, size_t len) {
   if (gAudioLen + len > gAudioCap) {
     size_t newCap = gAudioCap + max(len, (size_t)32768);
@@ -533,6 +658,7 @@ static bool sendBufferedCommandToGemini() {
   } else {
     Serial.println("[GEMINI] Failed to send command audio");
     gGeminiPendingUtterance = false;
+    playLocalFailureMessage();
     closeGeminiWebSocket();
     ESP_SR.setMode(SR_MODE_WAKEWORD);
   }
