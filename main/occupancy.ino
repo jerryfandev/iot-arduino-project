@@ -32,6 +32,8 @@ static unsigned long occupancyTimerStart = 0;
 static bool occupancyTimerActive = false;
 static bool frontendSensorWasEnabled = false;
 static bool motionInputArmed = false;
+static bool lastLightOn = false;
+static unsigned long lastExternalControlTimeSeen = 0;
 
 // --- UART parsing buffers ---
 #define LINE_BUF_LEN 64
@@ -50,6 +52,7 @@ static int lastFusedState = -1; // Track transitions
 extern bool gLightOn;
 extern bool gNeedsUpdate;
 extern bool gMotionSensorEnabled;
+extern unsigned long gLastExternalControlTime;
 void mqttPublishOccupancy(int occupied); // Defined in mqtt.ino
 
 static void resetOccupancyTimer() {
@@ -75,6 +78,11 @@ static void publishOccupancyIfChanged(int occupied) {
 
   mqttPublishOccupancy(occupied);
   lastFusedState = occupied;
+}
+
+static void startOccupancyCountdown(unsigned long now) {
+  occupancyTimerStart = now;
+  occupancyTimerActive = true;
 }
 
 static void logDetection(bool timerWasActive, bool motionTriggered,
@@ -134,6 +142,8 @@ void occupancySetup() {
   resetOccupancyTimer();
   radarOccupied = false;
   radarFrameReceived = false;
+  lastLightOn = gLightOn;
+  lastExternalControlTimeSeen = gLastExternalControlTime;
 
   lastFusedState = 0;
 }
@@ -156,6 +166,8 @@ void occupancyLoop() {
     drainSensorInputs();
     frontendSensorWasEnabled = false;
     motionInputArmed = false;
+    lastLightOn = gLightOn;
+    lastExternalControlTimeSeen = gLastExternalControlTime;
     publishOccupancyIfChanged(0);
     return;
   }
@@ -166,10 +178,27 @@ void occupancyLoop() {
     drainSensorInputs();
     lastSampleTime = now;
     motionInputArmed = false;
+    lastLightOn = gLightOn;
+    lastExternalControlTimeSeen = gLastExternalControlTime;
     publishOccupancyIfChanged(0);
     Serial.println("[Occupancy] Frontend motion sensor ON -> standby");
     return;
   }
+
+  bool lightTurnedOn = !lastLightOn && gLightOn;
+  bool externalControlChanged =
+      (gLastExternalControlTime != lastExternalControlTimeSeen);
+  if (externalControlChanged) {
+    lastExternalControlTimeSeen = gLastExternalControlTime;
+  }
+
+  if (gLightOn && (lightTurnedOn || externalControlChanged)) {
+    startOccupancyCountdown(now);
+    publishOccupancyIfChanged(1);
+    Serial.println(
+        "[Occupancy] External Light ON -> countdown 60s");
+  }
+  lastLightOn = gLightOn;
 
   // 1. NON-BLOCKING RADAR PARSING
   while (Serial2.available() > 0) {
@@ -230,8 +259,7 @@ void occupancyLoop() {
     // C. STATE MACHINE
     if (anySensorTriggered) {
       bool wasTimerActive = occupancyTimerActive;
-      occupancyTimerStart = now;
-      occupancyTimerActive = true;
+      startOccupancyCountdown(now);
 
       logDetection(wasTimerActive, motionTriggered, soundTriggered,
                    avgAmplitude);
@@ -239,6 +267,7 @@ void occupancyLoop() {
       if (!gLightOn) {
         gLightOn = true;
         gNeedsUpdate = true;
+        lastLightOn = true;
         Serial.println("[Occupancy] Turning Light ON");
       }
 
@@ -254,6 +283,7 @@ void occupancyLoop() {
       if (gLightOn) {
         gLightOn = false;
         gNeedsUpdate = true;
+        lastLightOn = false;
         Serial.println(
             "[Occupancy] No detection for 60s -> Turning Light OFF");
       }
