@@ -79,6 +79,7 @@ static volatile bool gCaptureCommandAudio = false;
 static volatile bool gGeminiSetupComplete = false;
 static volatile bool gGeminiPendingUtterance = false;
 static volatile bool gGeminiWaitingForResponse = false;
+static volatile bool gGeminiTurnComplete = false;
 static unsigned long gGeminiPendingSince = 0;
 static unsigned long gGeminiResponseSince = 0;
 
@@ -157,6 +158,7 @@ void onSrEvent(sr_event_t event, int command_id, int phrase_id) {
     gGeminiSetupComplete = false;
     gGeminiPendingUtterance = false;
     gGeminiWaitingForResponse = false;
+    gGeminiTurnComplete = false;
     openGeminiWebSocket();
     isStreaming = true;
     break;
@@ -188,6 +190,7 @@ void onSrEvent(sr_event_t event, int command_id, int phrase_id) {
     resetCommandAudio();
     gGeminiPendingUtterance = false;
     gGeminiWaitingForResponse = false;
+    gGeminiTurnComplete = false;
     closeGeminiWebSocket();
     isStreaming = false;
 
@@ -543,6 +546,7 @@ void processGeminiResponse(uint8_t *payload) {
     Serial.printf("[GEMINI] API error: %s\n", errJson.c_str());
     gGeminiPendingUtterance = false;
     gGeminiWaitingForResponse = false;
+    gGeminiTurnComplete = false;
     resetCommandAudio();
     closeGeminiWebSocket();
     ESP_SR.setMode(SR_MODE_WAKEWORD);
@@ -578,6 +582,8 @@ void processGeminiResponse(uint8_t *payload) {
 
     if (sc["turnComplete"].as<bool>()) {
       Serial.println("[GEMINI] turnComplete!");
+      gGeminiTurnComplete = true;
+      gGeminiPendingUtterance = false;
       playAllAudio(); // Play all audio at once to prevent stuttering
       gGeminiWaitingForResponse = false;
       closeGeminiWebSocket();
@@ -639,10 +645,22 @@ static bool sendBufferedCommandToGemini() {
     ok = gGeminiClient.connected();
     offset += chunkLen;
     processGeminiFrames();
+    if (gGeminiTurnComplete) {
+      ok = true;
+      break;
+    }
+    ok = ok && gGeminiClient.connected();
     yield();
   }
   free(b64);
   resetCommandAudio();
+
+  if (gGeminiTurnComplete) {
+    gGeminiPendingUtterance = false;
+    Serial.println(
+        "[GEMINI] Response completed during send; skipping failure fallback.");
+    return true;
+  }
 
   if (ok) {
     wsSendText("{\"realtimeInput\":{\"audioStreamEnd\":true}}");
@@ -939,6 +957,7 @@ static void processGeminiFrames() {
 void openGeminiWebSocket() {
   Serial.println("[WS] Opening socket to Gemini Live API...");
   gGeminiSetupComplete = false;
+  gGeminiTurnComplete = false;
 
   if (!wsConnect()) {
     Serial.println("[WS] Failed to open Gemini socket.");
@@ -954,9 +973,10 @@ void openGeminiWebSocket() {
   JsonArray siParts = systemInstruction.createNestedArray("parts");
   siParts.createNestedObject()["text"] =
       "MANDATORY RULES:\n"
-      "1. Only answer the user's request as short as possible, no more than 30 words.\n"
-      "2. Absolutely do not ask follow-up questions.\n"
-      "3. After providing the information, end the answer immediately.\n";
+      "1. You are Aoede, in Perth of Western Australia. \n"
+      "2. Only answer the user's request as short as possible, no more than 30 words.\n"
+      "3. Absolutely do not ask follow-up questions.\n"
+      "4. After providing the information, end the answer immediately.\n";
 
   JsonArray tools = setup.createNestedArray("tools");
   tools.createNestedObject().createNestedObject("googleSearch");
