@@ -1,11 +1,11 @@
 #include <Arduino.h>
 
 // ============================================================
-// GLOBAL STATE FOR OCCUPANCY (Motion + Sound, Independent)
+// GLOBAL STATE FOR OCCUPANCY (Motion + Sound, Single Timer)
 // ============================================================
 
-// --- Shared Hold Duration ---
-#define OCCUPANCY_HOLD_MS 60000 // 60 seconds minimum hold for either trigger
+// --- Shared Timeout Duration ---
+#define OCCUPANCY_TIMEOUT_MS 60000UL // 60 seconds without detection turns off light
 
 // --- mmWave Radar Config ---
 #define RADAR_RX_PIN 16
@@ -23,15 +23,15 @@ static const unsigned long SAMPLE_INTERVAL_MS = 200;
 
 // --- Radar State ---
 static bool radarOccupied = false;
+static bool radarFrameReceived = false;
 
-// --- Independent Hold Timers ---
-// Each detector has its own timer. When it triggers, its timer resets.
-// The light stays on as long as EITHER timer is still within OCCUPANCY_HOLD_MS.
-static unsigned long motionHoldTimer = 0;
-static bool motionHoldActive = false;
-
-static unsigned long soundHoldTimer = 0;
-static bool soundHoldActive = false;
+// --- Occupancy Countdown Timer ---
+// A single non-blocking timer starts when motion OR sound turns the light on.
+// Any later motion OR sound detection resets the full 60-second countdown.
+static unsigned long occupancyTimerStart = 0;
+static bool occupancyTimerActive = false;
+static bool frontendSensorWasEnabled = false;
+static bool motionInputArmed = false;
 
 // --- UART parsing buffers ---
 #define LINE_BUF_LEN 64
@@ -50,8 +50,47 @@ static int lastFusedState = -1; // Track transitions
 extern bool gLightOn;
 extern bool gNeedsUpdate;
 extern bool gMotionSensorEnabled;
-extern unsigned long gLastExternalControlTime;
 void mqttPublishOccupancy(int occupied); // Defined in mqtt.ino
+
+static void resetOccupancyTimer() {
+  occupancyTimerStart = 0;
+  occupancyTimerActive = false;
+}
+
+static void drainSensorInputs() {
+  while (Serial2.available() > 0) {
+    Serial2.read();
+  }
+
+  line_pos = 0;
+  radarOccupied = false;
+  radarFrameReceived = false;
+  audioSampleSum = 0;
+  audioSampleCount = 0;
+}
+
+static void publishOccupancyIfChanged(int occupied) {
+  if (occupied == lastFusedState)
+    return;
+
+  mqttPublishOccupancy(occupied);
+  lastFusedState = occupied;
+}
+
+static void logDetection(bool timerWasActive, bool motionTriggered,
+                         bool soundTriggered, int32_t avgAmplitude) {
+  const char *action =
+      timerWasActive ? "countdown reset" : "light ON, countdown 60s";
+
+  if (soundTriggered) {
+    Serial.printf("[Occupancy] Detection -> %s (motion=%s, sound=yes, "
+                  "amp=%d)\n",
+                  action, motionTriggered ? "yes" : "no", avgAmplitude);
+  } else {
+    Serial.printf("[Occupancy] Detection -> %s (motion=%s, sound=no)\n",
+                  action, motionTriggered ? "yes" : "no");
+  }
+}
 
 // ============================================================
 // AUDIO PROCESSING (called from commands.ino -> onSrAudio)
@@ -91,11 +130,10 @@ void occupancySetup() {
   Serial.println("[Occupancy] Initialized mmWave Radar + Sound Detection");
   lastSampleTime = millis();
 
-  // Ensure both hold timers are expired on boot
-  motionHoldTimer = millis() - OCCUPANCY_HOLD_MS;
-  motionHoldActive = false;
-  soundHoldTimer = millis() - OCCUPANCY_HOLD_MS;
-  soundHoldActive = false;
+  // Ensure the countdown timer is reset on boot
+  resetOccupancyTimer();
+  radarOccupied = false;
+  radarFrameReceived = false;
 
   lastFusedState = 0;
 }
@@ -104,6 +142,35 @@ void occupancySetup() {
 // MAIN LOOP
 // ============================================================
 void occupancyLoop() {
+  unsigned long now = millis();
+
+  // Frontend OFF: immediately reset timers and ignore sensor inputs.
+  // The current light state is intentionally left unchanged.
+  if (!gMotionSensorEnabled) {
+    if (occupancyTimerActive || lastFusedState != 0) {
+      Serial.println(
+          "[Occupancy] Frontend motion sensor OFF -> reset countdown");
+    }
+
+    resetOccupancyTimer();
+    drainSensorInputs();
+    frontendSensorWasEnabled = false;
+    motionInputArmed = false;
+    publishOccupancyIfChanged(0);
+    return;
+  }
+
+  if (!frontendSensorWasEnabled) {
+    frontendSensorWasEnabled = true;
+    resetOccupancyTimer();
+    drainSensorInputs();
+    lastSampleTime = now;
+    motionInputArmed = false;
+    publishOccupancyIfChanged(0);
+    Serial.println("[Occupancy] Frontend motion sensor ON -> standby");
+    return;
+  }
+
   // 1. NON-BLOCKING RADAR PARSING
   while (Serial2.available() > 0) {
     char c = (char)Serial2.read();
@@ -113,8 +180,10 @@ void occupancyLoop() {
         char statusChar = line_buf[7];
         if (statusChar == '1') {
           radarOccupied = true;
+          radarFrameReceived = true;
         } else if (statusChar == '0') {
           radarOccupied = false;
+          radarFrameReceived = true;
         }
       }
       line_pos = 0;
@@ -129,43 +198,21 @@ void occupancyLoop() {
   }
 
   // 2. TIMED SENSING LOOP (200ms)
-  unsigned long now = millis();
   if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
     lastSampleTime = now;
 
-    // When motion sensor is DISABLED, clear all holds and skip detection
-    if (!gMotionSensorEnabled) {
-      // Drain any accumulated audio data
-      audioSampleSum = 0;
-      audioSampleCount = 0;
-
-      // If holds were active, expire them and publish transition
-      if (motionHoldActive || soundHoldActive) {
-        motionHoldActive = false;
-        soundHoldActive = false;
-        if (lastFusedState != 0) {
-          Serial.println("[Occupancy] Sensor DISABLED -> clearing holds");
-          lastFusedState = 0;
-          mqttPublishOccupancy(0);
-        }
+    // A. MOTION DETECTOR
+    bool motionTriggered = false;
+    if (!motionInputArmed) {
+      if (radarFrameReceived) {
+        motionInputArmed = true;
+        Serial.println("[Occupancy] Motion input armed after first radar frame");
       }
-      return; // Skip all detection logic
+    } else {
+      motionTriggered = radarOccupied;
     }
 
-    // ── A. MOTION DETECTOR (independent) ──────────────────────
-    if (radarOccupied) {
-      if (!motionHoldActive) {
-        Serial.println("[Occupancy] Motion DETECTED -> hold 60s");
-      }
-      motionHoldTimer = now;
-      motionHoldActive = true;
-    } else if (motionHoldActive &&
-               (now - motionHoldTimer >= OCCUPANCY_HOLD_MS)) {
-      Serial.println("[Occupancy] Motion hold EXPIRED");
-      motionHoldActive = false;
-    }
-
-    // ── B. SOUND DETECTOR (independent) ───────────────────────
+    // B. SOUND DETECTOR
     // Retrieve and reset audio statistics accumulated since last tick
     int32_t avgAmplitude = 0;
     int64_t localSum = audioSampleSum;
@@ -178,57 +225,37 @@ void occupancyLoop() {
     }
 
     bool soundTriggered = (avgAmplitude > VOICE_THRESHOLD_16BIT);
+    bool anySensorTriggered = motionTriggered || soundTriggered;
 
-    if (soundTriggered) {
-      if (!soundHoldActive) {
-        Serial.printf("[Occupancy] Sound DETECTED (amp=%d) -> hold 60s\n",
-                      avgAmplitude);
-      } else {
-        Serial.printf("[Occupancy] Sound active (amp=%d)\n", avgAmplitude);
+    // C. STATE MACHINE
+    if (anySensorTriggered) {
+      bool wasTimerActive = occupancyTimerActive;
+      occupancyTimerStart = now;
+      occupancyTimerActive = true;
+
+      logDetection(wasTimerActive, motionTriggered, soundTriggered,
+                   avgAmplitude);
+
+      if (!gLightOn) {
+        gLightOn = true;
+        gNeedsUpdate = true;
+        Serial.println("[Occupancy] Turning Light ON");
       }
-      soundHoldTimer = now;
-      soundHoldActive = true;
-    } else if (soundHoldActive && (now - soundHoldTimer >= OCCUPANCY_HOLD_MS)) {
-      Serial.println("[Occupancy] Sound hold EXPIRED");
-      soundHoldActive = false;
+
+      publishOccupancyIfChanged(1);
+      return;
     }
 
-    // ── C. FUSED STATE: OR of both independent holds ──────────
-    // Room is occupied if EITHER detector's hold is still active.
-    int fusedState = (motionHoldActive || soundHoldActive) ? 1 : 0;
+    if (occupancyTimerActive &&
+        (now - occupancyTimerStart >= OCCUPANCY_TIMEOUT_MS)) {
+      resetOccupancyTimer();
+      publishOccupancyIfChanged(0);
 
-    // ── D. Transition and MQTT Occupancy Publish ──────────────
-    if (fusedState != lastFusedState) {
-      Serial.printf("[Occupancy] State transitioned from %d to %d "
-                    "(motion=%s, sound=%s)\n",
-                    lastFusedState, fusedState,
-                    motionHoldActive ? "ACTIVE" : "idle",
-                    soundHoldActive ? "ACTIVE" : "idle");
-
-      // MQTT Publish
-      mqttPublishOccupancy(fusedState);
-
-      lastFusedState = fusedState;
-    }
-
-    // ── E. Lighting Control ───────────────────────────────────
-    // Cooldown guard: Only override light if 60 seconds have elapsed since
-    // last external control (MQTT/voice command)
-    if (millis() - gLastExternalControlTime >= 60000) {
-      if (fusedState == 1) {
-        // Room occupied -> force light ON if it was OFF
-        if (!gLightOn) {
-          gLightOn = true;
-          gNeedsUpdate = true;
-          Serial.println("[Occupancy] Room occupied -> Turning Light ON");
-        }
-      } else {
-        // Room vacant -> force light OFF if it was ON
-        if (gLightOn) {
-          gLightOn = false;
-          gNeedsUpdate = true;
-          Serial.println("[Occupancy] Room vacant -> Turning Light OFF");
-        }
+      if (gLightOn) {
+        gLightOn = false;
+        gNeedsUpdate = true;
+        Serial.println(
+            "[Occupancy] No detection for 60s -> Turning Light OFF");
       }
     }
   }
