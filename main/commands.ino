@@ -62,7 +62,7 @@ extern unsigned long gLastExternalControlTime;
 #define GEMINI_I2S_PORT I2S_NUM_1
 #define AUDIO_SAMPLE_RATE 24000
 
-static const char *GEMINI_API_KEY = "AIzaSy_________________cfIKw";
+static const char *GEMINI_API_KEY = "AIzaSyAwZpdzZDp1mwjAI52ulEaG4qqZ9JgYqD8";
 static const char *GEMINI_MODEL = "gemini-3.1-flash-live-preview";
 static const char *GEMINI_HOST = "generativelanguage.googleapis.com";
 static const int GEMINI_PORT = 443;

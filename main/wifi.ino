@@ -3,8 +3,8 @@
 #include <time.h>
 
 // Fill these in (or replace with your own credential loading method).
-static const char *WIFI_SSID = "Jerry's iPhone";
-static const char *WIFI_PASSWORD = "1122334455";
+static const char *WIFI_SSID = "Khanh's S22";
+static const char *WIFI_PASSWORD = "kands2713";
 static const char *DEVICE_TZ = "AWST-8"; // POSIX TZ for Perth/GMT+8.
 
 void checkInternet() {
