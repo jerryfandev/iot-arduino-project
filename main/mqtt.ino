@@ -7,21 +7,28 @@
 #include <time.h>
 
 // VPS MQTT broker (TCP)
-static const char* MQTT_HOST = "iotsmartlight.space";
+static const char *MQTT_HOST = "iotsmartlight.space";
 static const uint16_t MQTT_PORT = 1883;
 
-// Topic must match Web dashboard
-static const char* MQTT_TOPIC = "home/livingroom/light";
-static const char* MQTT_TOPIC_SENSOR = "home/livingroom/light-sensor";
+// Split topics to avoid command/state feedback loops.
+// Web UI should publish commands to /set and subscribe to /state.
+static const char *MQTT_TOPIC_LIGHT_SET = "home/livingroom/light/set";
+static const char *MQTT_TOPIC_LIGHT_STATE = "home/livingroom/light/state";
+static const char *MQTT_TOPIC_LIGHT_LEGACY = "home/livingroom/light";
+static const char *MQTT_TOPIC_SENSOR = "home/livingroom/light-sensor";
 // Frontend timer payloads:
 // off-timer: {"duration":300,"at_time":null} where duration is seconds.
 // on-timer:  {"duration":null,"at_time":"14:30"} in Perth local time.
-static const char* MQTT_TOPIC_OFF_TIMER = "home/livingroom/light/off-timer";
-static const char* MQTT_TOPIC_ON_TIMER = "home/livingroom/light/on-timer";
-static const char* MQTT_TOPIC_OFF_TIMER_STATE =
+static const char *MQTT_TOPIC_OFF_TIMER = "home/livingroom/light/off-timer";
+static const char *MQTT_TOPIC_ON_TIMER = "home/livingroom/light/on-timer";
+static const char *MQTT_TOPIC_OFF_TIMER_STATE =
     "home/livingroom/light/off-timer/state";
-static const char* MQTT_TOPIC_ON_TIMER_STATE =
+static const char *MQTT_TOPIC_ON_TIMER_STATE =
     "home/livingroom/light/on-timer/state";
+static const char *MQTT_TOPIC_OCCUPANCY = "home/livingroom/occupancy";
+static const char *MQTT_TOPIC_MOTION = "home/livingroom/motion-sensor";
+static const char *MQTT_TOPIC_MOTION_STATE =
+    "home/livingroom/motion-sensor/state";
 
 static WiFiClient gNetClient;
 static PubSubClient gMqtt(gNetClient);
@@ -29,6 +36,8 @@ static PubSubClient gMqtt(gNetClient);
 extern bool gLightOn;
 extern bool gNeedsUpdate;
 extern bool gLightSensorEnabled;
+extern bool gMotionSensorEnabled;
+extern unsigned long gLastExternalControlTime;
 
 static bool gOffAfterActive = false;
 static unsigned long gOffAfterAtMillis = 0;
@@ -39,34 +48,40 @@ static bool gOnAtActive = false;
 static String gOnAtClock = "";
 static time_t gOnAtEpoch = 0;
 static bool gOnTimerStateNeedsPublish = false;
+static bool gMotionSensorStateNeedsPublish = false;
 
 static void publishOffTimerStateIfNeeded();
 static void publishOnTimerStateIfNeeded();
+static void publishMotionSensorStateIfNeeded();
 
 static bool isSyncedTime() {
   return time(nullptr) > 1700000000; // Well past ESP32's 1970 default.
 }
 
-static bool parseUnsignedLong(const String& text, unsigned long& out) {
-  if (text.length() == 0) return false;
+static bool parseUnsignedLong(const String &text, unsigned long &out) {
+  if (text.length() == 0)
+    return false;
   for (unsigned int i = 0; i < text.length(); i++) {
-    if (!isDigit(text.charAt(i))) return false;
+    if (!isDigit(text.charAt(i)))
+      return false;
   }
 
-  char* end = nullptr;
+  char *end = nullptr;
   unsigned long value = strtoul(text.c_str(), &end, 10);
-  if (*end != '\0') return false;
+  if (*end != '\0')
+    return false;
 
   out = value;
   return true;
 }
 
-static bool parseClock(const String& msg, uint8_t& hour, uint8_t& minute) {
+static bool parseClock(const String &msg, uint8_t &hour, uint8_t &minute) {
   String text = msg;
   text.trim();
 
   int colon = text.indexOf(':');
-  if (colon <= 0 || colon != text.lastIndexOf(':')) return false;
+  if (colon <= 0 || colon != text.lastIndexOf(':'))
+    return false;
 
   unsigned long parsedHour = 0;
   unsigned long parsedMinute = 0;
@@ -75,7 +90,8 @@ static bool parseClock(const String& msg, uint8_t& hour, uint8_t& minute) {
     return false;
   }
 
-  if (parsedHour > 23 || parsedMinute > 59) return false;
+  if (parsedHour > 23 || parsedMinute > 59)
+    return false;
 
   hour = static_cast<uint8_t>(parsedHour);
   minute = static_cast<uint8_t>(parsedMinute);
@@ -83,7 +99,8 @@ static bool parseClock(const String& msg, uint8_t& hour, uint8_t& minute) {
 }
 
 static time_t nextLocalClockEpoch(uint8_t hour, uint8_t minute) {
-  if (!isSyncedTime()) return 0;
+  if (!isSyncedTime())
+    return 0;
 
   time_t now = time(nullptr);
   struct tm localTime;
@@ -110,7 +127,8 @@ static void printLocalSchedule(time_t target) {
 }
 
 static String formatLocalSchedule(time_t target) {
-  if (target == 0) return "null";
+  if (target == 0)
+    return "null";
 
   struct tm localTime;
   localtime_r(&target, &localTime);
@@ -120,7 +138,7 @@ static String formatLocalSchedule(time_t target) {
   return String("\"") + buf + "\"";
 }
 
-static void clearOffAfterTimer(const char* reason) {
+static void clearOffAfterTimer(const char *reason) {
   gOffAfterActive = false;
   gOffAfterDurationSeconds = 0;
   gOffAfterAtEpoch = 0;
@@ -134,7 +152,7 @@ static void clearOffAfterTimer(const char* reason) {
   publishOffTimerStateIfNeeded();
 }
 
-static void clearOnAtTimer(const char* reason) {
+static void clearOnAtTimer(const char *reason) {
   gOnAtActive = false;
   gOnAtClock = "";
   gOnAtEpoch = 0;
@@ -148,24 +166,28 @@ static void clearOnAtTimer(const char* reason) {
   publishOnTimerStateIfNeeded();
 }
 
-static bool readJsonValue(const String& msg, const char* key, String& value) {
+static bool readJsonValue(const String &msg, const char *key, String &value) {
   String quotedKey = String("\"") + key + "\"";
   int keyPos = msg.indexOf(quotedKey);
-  if (keyPos < 0) return false;
+  if (keyPos < 0)
+    return false;
 
   int colonPos = msg.indexOf(':', keyPos + quotedKey.length());
-  if (colonPos < 0) return false;
+  if (colonPos < 0)
+    return false;
 
   int start = colonPos + 1;
   while (start < msg.length() && isSpace(msg.charAt(start))) {
     start++;
   }
 
-  if (start >= msg.length()) return false;
+  if (start >= msg.length())
+    return false;
 
   if (msg.charAt(start) == '"') {
     int end = msg.indexOf('"', start + 1);
-    if (end < 0) return false;
+    if (end < 0)
+      return false;
     value = msg.substring(start + 1, end);
     value.trim();
     return true;
@@ -182,20 +204,20 @@ static bool readJsonValue(const String& msg, const char* key, String& value) {
   return true;
 }
 
-static bool isJsonNull(const String& value) {
+static bool isJsonNull(const String &value) {
   String text = value;
   text.trim();
   text.toUpperCase();
   return text == "NULL";
 }
 
-static bool readDurationSeconds(const String& value, unsigned long& seconds) {
+static bool readDurationSeconds(const String &value, unsigned long &seconds) {
   String durationText = value;
   durationText.trim();
   return parseUnsignedLong(durationText, seconds);
 }
 
-static void handleOffTimerPayload(const String& msg) {
+static void handleOffTimerPayload(const String &msg) {
   Serial.print("[MQTT] OFF timer object received: ");
   Serial.println(msg);
 
@@ -235,7 +257,7 @@ static void handleOffTimerPayload(const String& msg) {
   publishOffTimerStateIfNeeded();
 }
 
-static void handleOnTimerPayload(const String& msg) {
+static void handleOnTimerPayload(const String &msg) {
   Serial.print("[MQTT] ON timer object received: ");
   Serial.println(msg);
 
@@ -273,8 +295,9 @@ static void handleOnTimerPayload(const String& msg) {
   publishOnTimerStateIfNeeded();
 }
 
-static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
-  if (!topic) return;
+static void mqttOnMessage(char *topic, byte *payload, unsigned int length) {
+  if (!topic)
+    return;
 
   String topicStr = String(topic);
   String msg;
@@ -287,7 +310,11 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
   String commandMsg = msg;
   commandMsg.toUpperCase();
 
-  if (topicStr == MQTT_TOPIC) {
+  if (topicStr == MQTT_TOPIC_LIGHT_SET || topicStr == MQTT_TOPIC_LIGHT_LEGACY) {
+    gLastExternalControlTime = millis();
+    if (topicStr == MQTT_TOPIC_LIGHT_LEGACY) {
+      Serial.println("[MQTT] Warning: legacy light topic used (consider /set)");
+    }
     if (commandMsg == "ON") {
       if (!gLightOn) {
         gLightOn = true;
@@ -313,6 +340,20 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
         Serial.println("[MQTT] Light Sensor => OFF");
       }
     }
+  } else if (topicStr == MQTT_TOPIC_MOTION) {
+    if (commandMsg == "ON") {
+      if (!gMotionSensorEnabled) {
+        gMotionSensorEnabled = true;
+        gMotionSensorStateNeedsPublish = true;
+        Serial.println("[MQTT] Motion Sensor => ON");
+      }
+    } else if (commandMsg == "OFF") {
+      if (gMotionSensorEnabled) {
+        gMotionSensorEnabled = false;
+        gMotionSensorStateNeedsPublish = true;
+        Serial.println("[MQTT] Motion Sensor => OFF");
+      }
+    }
   } else if (topicStr == MQTT_TOPIC_OFF_TIMER) {
     handleOffTimerPayload(msg);
   } else if (topicStr == MQTT_TOPIC_ON_TIMER) {
@@ -326,10 +367,11 @@ static void mqttOnMessage(char* topic, byte* payload, unsigned int length) {
 }
 
 static void publishLightStateIfNeeded() {
-  if (!gNeedsUpdate || !gMqtt.connected()) return;
+  if (!gNeedsUpdate || !gMqtt.connected())
+    return;
 
-  const char* state = gLightOn ? "ON" : "OFF";
-  if (gMqtt.publish(MQTT_TOPIC, state, true)) {
+  const char *state = gLightOn ? "ON" : "OFF";
+  if (gMqtt.publish(MQTT_TOPIC_LIGHT_STATE, state, true)) {
     gNeedsUpdate = false;
     Serial.print("[MQTT] Published light state => ");
     Serial.println(state);
@@ -340,7 +382,8 @@ static void publishLightStateIfNeeded() {
 }
 
 static void publishOffTimerStateIfNeeded() {
-  if (!gOffTimerStateNeedsPublish || !gMqtt.connected()) return;
+  if (!gOffTimerStateNeedsPublish || !gMqtt.connected())
+    return;
 
   String payload;
   if (gOffAfterActive) {
@@ -357,9 +400,8 @@ static void publishOffTimerStateIfNeeded() {
     payload += formatLocalSchedule(gOffAfterAtEpoch);
     payload += "}";
   } else {
-    payload =
-        "{\"active\":false,\"duration\":null,\"trigger_epoch\":null,"
-        "\"trigger_at\":null}";
+    payload = "{\"active\":false,\"duration\":null,\"trigger_epoch\":null,"
+              "\"trigger_at\":null}";
   }
 
   if (gMqtt.publish(MQTT_TOPIC_OFF_TIMER_STATE, payload.c_str(), true)) {
@@ -373,7 +415,8 @@ static void publishOffTimerStateIfNeeded() {
 }
 
 static void publishOnTimerStateIfNeeded() {
-  if (!gOnTimerStateNeedsPublish || !gMqtt.connected()) return;
+  if (!gOnTimerStateNeedsPublish || !gMqtt.connected())
+    return;
 
   String payload;
   if (gOnAtActive) {
@@ -386,9 +429,8 @@ static void publishOnTimerStateIfNeeded() {
     payload += formatLocalSchedule(gOnAtEpoch);
     payload += "}";
   } else {
-    payload =
-        "{\"active\":false,\"at_time\":null,\"trigger_epoch\":null,"
-        "\"trigger_at\":null}";
+    payload = "{\"active\":false,\"at_time\":null,\"trigger_epoch\":null,"
+              "\"trigger_at\":null}";
   }
 
   if (gMqtt.publish(MQTT_TOPIC_ON_TIMER_STATE, payload.c_str(), true)) {
@@ -401,12 +443,30 @@ static void publishOnTimerStateIfNeeded() {
   }
 }
 
-static void mqttEnsureConnected() {
-  if (gMqtt.connected()) return;
-  if (WiFi.status() != WL_CONNECTED) return;
+static void publishMotionSensorStateIfNeeded() {
+  if (!gMotionSensorStateNeedsPublish || !gMqtt.connected())
+    return;
 
-  const String clientId =
-    String("esp32_") + String((uint32_t)ESP.getEfuseMac(), HEX) + "_" + String(millis());
+  const char *state = gMotionSensorEnabled ? "ON" : "OFF";
+  if (gMqtt.publish(MQTT_TOPIC_MOTION_STATE, state, true)) {
+    gMotionSensorStateNeedsPublish = false;
+    Serial.print("[MQTT] Published motion sensor state => ");
+    Serial.println(state);
+  } else {
+    Serial.print("[MQTT] Failed to publish motion sensor state => ");
+    Serial.println(state);
+  }
+}
+
+static void mqttEnsureConnected() {
+  if (gMqtt.connected())
+    return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+
+  const String clientId = String("esp32_") +
+                          String((uint32_t)ESP.getEfuseMac(), HEX) + "_" +
+                          String(millis());
 
   Serial.print("[MQTT] Connecting to ");
   Serial.print(MQTT_HOST);
@@ -418,12 +478,15 @@ static void mqttEnsureConnected() {
   // No username/password (adjust if your broker requires auth)
   if (gMqtt.connect(clientId.c_str())) {
     Serial.println("[MQTT] Connected");
-    gMqtt.subscribe(MQTT_TOPIC);
+    gMqtt.subscribe(MQTT_TOPIC_LIGHT_SET);
+    gMqtt.subscribe(MQTT_TOPIC_LIGHT_LEGACY);
     gMqtt.subscribe(MQTT_TOPIC_SENSOR);
+    gMqtt.subscribe(MQTT_TOPIC_MOTION);
     gMqtt.subscribe(MQTT_TOPIC_OFF_TIMER);
     gMqtt.subscribe(MQTT_TOPIC_ON_TIMER);
     gOffTimerStateNeedsPublish = true;
     gOnTimerStateNeedsPublish = true;
+    gMotionSensorStateNeedsPublish = true;
     return;
   }
 
@@ -444,14 +507,14 @@ void mqttLoop() {
     gMqtt.loop();
   }
 
-  if (gOffAfterActive &&
-      static_cast<long>(millis() - gOffAfterAtMillis) >= 0) {
+  if (gOffAfterActive && static_cast<long>(millis() - gOffAfterAtMillis) >= 0) {
     gOffAfterActive = false;
     gOffAfterDurationSeconds = 0;
     gOffAfterAtEpoch = 0;
     gOffTimerStateNeedsPublish = true;
     gLightOn = false;
     gNeedsUpdate = true;
+    gLastExternalControlTime = millis();
     Serial.println("[MQTT] OFF timer fired");
   }
 
@@ -462,10 +525,26 @@ void mqttLoop() {
     gOnTimerStateNeedsPublish = true;
     gLightOn = true;
     gNeedsUpdate = true;
+    gLastExternalControlTime = millis();
     Serial.println("[MQTT] ON schedule fired");
   }
 
   publishLightStateIfNeeded();
   publishOffTimerStateIfNeeded();
   publishOnTimerStateIfNeeded();
+  publishMotionSensorStateIfNeeded();
+}
+
+void mqttPublishOccupancy(int occupied) {
+  if (!gMqtt.connected())
+    return;
+
+  const char *state = occupied ? "1" : "0";
+  if (gMqtt.publish(MQTT_TOPIC_OCCUPANCY, state, true)) {
+    Serial.print("[MQTT] Published occupancy => ");
+    Serial.println(state);
+  } else {
+    Serial.print("[MQTT] Failed to publish occupancy => ");
+    Serial.println(state);
+  }
 }
